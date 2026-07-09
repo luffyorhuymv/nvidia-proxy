@@ -32,7 +32,30 @@ Point any OpenAI client at `http://localhost:8787/v1`.
 |-----|---------|-------|
 | `NVIDIA_API_KEY` | — (required) | One or more keys, comma-separated |
 | `PORT` | `8787` | |
+| `HOST` | `0.0.0.0` | Bind address. `0.0.0.0` = reachable from other machines |
+| `PROXY_TOKEN` | — | If set, callers must send `Authorization: Bearer <token>`. **Set this when exposing the proxy.** |
 | `MODELS` | see `server.mjs` | Fallback chain, comma-separated, in priority order |
+
+## Access from other machines / a domain
+
+The server binds `0.0.0.0` by default, so it's reachable at `http://<machine-ip>:8787/v1`
+from any device on the network. **Always set `PROXY_TOKEN`** first — otherwise anyone
+who reaches the port can spend your NVIDIA keys.
+
+```sh
+PROXY_TOKEN="s3cret" NVIDIA_API_KEY="nvapi-aaa,nvapi-bbb" node server.mjs
+```
+
+Clients then use `PROXY_TOKEN` as their OpenAI API key:
+
+```sh
+curl http://SERVER_IP:8787/v1/chat/completions \
+  -H "Authorization: Bearer s3cret" -H "content-type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hi"}]}'
+```
+
+For a domain + HTTPS, put it behind any reverse proxy (Caddy, nginx, or a Cloudflare
+Tunnel) pointing at `127.0.0.1:8787`. CORS is enabled (`*`) so browser clients work too.
 
 ## Rotation logic
 

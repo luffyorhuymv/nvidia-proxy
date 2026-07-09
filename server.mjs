@@ -2,6 +2,9 @@ import { createServer } from "node:http";
 
 const UPSTREAM = "https://integrate.api.nvidia.com/v1";
 const PORT = Number(process.env.PORT || 8787);
+const HOST = process.env.HOST || "0.0.0.0"; // bind all interfaces so other machines can reach it
+// Auth for callers from other machines. If set, requests must send: Authorization: Bearer <token>.
+const PROXY_TOKEN = (process.env.PROXY_TOKEN || "").trim();
 
 // Keys: rotate on quota/auth failure. Comma-separated in NVIDIA_API_KEY.
 const KEYS = (process.env.NVIDIA_API_KEY || "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -59,31 +62,49 @@ async function callUpstream(path, body, model, key) {
   });
 }
 
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET,POST,OPTIONS",
+  "access-control-allow-headers": "authorization,content-type",
+};
+
 const server = createServer(async (req, res) => {
   try {
+    if (req.method === "OPTIONS") { res.writeHead(204, CORS); return res.end(); }
+
     if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, { "content-type": "application/json", ...CORS });
       return res.end(JSON.stringify({
         ok: true,
+        auth: PROXY_TOKEN ? "required" : "open",
         keys: KEYS.map((k, i) => ({ idx: i, tail: k.slice(-6), cooling: isCool(k) })),
         models: MODELS.map((m) => ({ model: m, cooling: isCool(m) })),
       }));
     }
 
+    // Auth gate for everything below (skip /health so you can monitor without token).
+    if (PROXY_TOKEN) {
+      const auth = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+      if (auth !== PROXY_TOKEN) {
+        res.writeHead(401, { "content-type": "application/json", ...CORS });
+        return res.end(JSON.stringify({ error: "unauthorized" }));
+      }
+    }
+
     if (req.method === "GET" && (req.url === "/v1/models" || req.url === "/models")) {
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, { "content-type": "application/json", ...CORS });
       return res.end(JSON.stringify({ object: "list", data: MODELS.map((id) => ({ id, object: "model", owned_by: "nvidia" })) }));
     }
 
     if (req.method !== "POST" || !req.url.includes("/chat/completions")) {
-      res.writeHead(404, { "content-type": "application/json" });
+      res.writeHead(404, { "content-type": "application/json", ...CORS });
       return res.end(JSON.stringify({ error: "not found" }));
     }
 
     const raw = await readBody(req);
     let body;
     try { body = JSON.parse(raw.toString("utf8") || "{}"); }
-    catch { res.writeHead(400); return res.end(JSON.stringify({ error: "invalid json" })); }
+    catch { res.writeHead(400, CORS); return res.end(JSON.stringify({ error: "invalid json" })); }
 
     const models = orderedModels(body.model);
     let last = null;
@@ -101,6 +122,7 @@ const server = createServer(async (req, res) => {
             "content-type": up.headers.get("content-type") || "application/json",
             "x-proxy-model": model,
             "x-proxy-key": String(KEYS.indexOf(key)),
+            ...CORS,
           });
           const reader = up.body.getReader();
           for (;;) {
@@ -126,17 +148,19 @@ const server = createServer(async (req, res) => {
         if (up.status === 404) { cool(model, 300_000); continue; } // model gone: next model
         if (up.status >= 500) { cool(model, 30_000); continue; }   // upstream hiccup: next model
         // real client error (e.g. 400): return as-is
-        res.writeHead(up.status, { "content-type": "application/json", "x-proxy-model": model });
+        res.writeHead(up.status, { "content-type": "application/json", "x-proxy-model": model, ...CORS });
         return res.end(text || JSON.stringify({ error: "upstream error" }));
       }
     }
 
-    res.writeHead(last?.status || 503, { "content-type": "application/json" });
+    res.writeHead(last?.status || 503, { "content-type": "application/json", ...CORS });
     res.end(JSON.stringify({ error: "all keys/models exhausted", detail: last }));
   } catch (e) {
-    res.writeHead(500, { "content-type": "application/json" });
+    res.writeHead(500, { "content-type": "application/json", ...CORS });
     res.end(JSON.stringify({ error: String(e) }));
   }
 });
 
-server.listen(PORT, () => console.log(`nvidia-proxy on :${PORT} | models=${MODELS.length} keys=${KEYS.length}`));
+server.listen(PORT, HOST, () =>
+  console.log(`nvidia-proxy on ${HOST}:${PORT} | models=${MODELS.length} keys=${KEYS.length} | auth=${PROXY_TOKEN ? "on" : "OPEN"}`)
+);
