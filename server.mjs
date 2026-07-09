@@ -8,7 +8,7 @@ const KEYS = (process.env.NVIDIA_API_KEY || "").split(",").map((s) => s.trim()).
 
 // Fallback model chain. First that has quota wins. Override with MODELS env (comma-separated).
 const MODELS = (process.env.MODELS ||
-  "openai/gpt-oss-120b,deepseek-ai/deepseek-v4-pro,qwen/qwen3.5-122b-a10b,nvidia/nemotron-3-super-120b-a12b,nvidia/llama-3.3-nemotron-super-49b-v1.5,minimaxai/minimax-m3,minimaxai/minimax-m2.7,mistralai/mistral-medium-3.5-128b,mistralai/mistral-small-4-119b-2603,mistralai/mistral-nemotron,openai/gpt-oss-20b,meta/llama-3.1-8b-instruct"
+  "mistralai/mistral-large-3-675b-instruct-2512,nvidia/nemotron-3-ultra-550b-a55b,qwen/qwen3.5-122b-a10b,deepseek-ai/deepseek-v4-pro,openai/gpt-oss-120b,nvidia/nemotron-3-super-120b-a12b,minimaxai/minimax-m3,mistralai/mistral-small-4-119b-2603,nvidia/nemotron-3-nano-30b-a3b,meta/llama-3.1-8b-instruct"
 ).split(",").map((s) => s.trim()).filter(Boolean);
 
 if (!KEYS.length) {
@@ -29,6 +29,15 @@ const retryAfterMs = (res, def) => {
 function ready(list) {
   const r = list.filter((x) => !isCool(x));
   return r.length ? r : list; // all cooling: try anyway
+}
+
+// Round-robin key start so load spreads across keys (higher aggregate RPM).
+let rr = 0;
+function readyKeys() {
+  const r = ready(KEYS);
+  if (r.length < 2) return r;
+  const i = rr++ % r.length;
+  return r.slice(i).concat(r.slice(0, i));
 }
 function orderedModels(preferred) {
   const chain = preferred ? [preferred, ...MODELS.filter((m) => m !== preferred)] : [...MODELS];
@@ -81,7 +90,7 @@ const server = createServer(async (req, res) => {
 
     // Key is the primary rotation axis (rate limit may be per-key global).
     // Model is secondary: switch on 404/5xx (model unavailable).
-    for (const key of ready(KEYS)) {
+    for (const key of readyKeys()) {
       for (const model of models) {
         let up;
         try { up = await callUpstream("/chat/completions", body, model, key); }
